@@ -4,6 +4,8 @@ from .layerwrapper import WrappedGPT, BiasGPT
 from .data import get_loaders 
 import math
 from tqdm import tqdm
+import copy
+import torch.nn.functional as F
 
 # create a dictionary to map the method name to the function
 """
@@ -109,6 +111,7 @@ def compress(layer, attn_mask, mlp_mask, attn_mean_inp, mlp_mean_inp, device, bi
     # Real Pruning
     # Attention Weight Pruning
     if attn_mask is not None:
+        
         retain_heads_kv = torch.count_nonzero(attn_mask)
         retain_heads_qo = torch.count_nonzero(attn_mask).repeat_interleave(args.gqa_groups)
         attn_mask_kv = attn_mask.repeat_interleave(args.head_dim)
@@ -124,9 +127,17 @@ def compress(layer, attn_mask, mlp_mask, attn_mean_inp, mlp_mean_inp, device, bi
         layer.self_attn.q_proj.out_features = attn_mask_qo.sum().item()
         layer.self_attn.k_proj.out_features = attn_mask_kv.sum().item()
         layer.self_attn.v_proj.out_features = attn_mask_kv.sum().item()
-        
+
         output_weight = layer.self_attn.o_proj.weight.data
-        
+
+        # Support for models with KQV Bias
+        if layer.self_attn.v_proj.bias.data is not None:
+            layer.self_attn.v_proj.bias.data = layer.self_attn.v_proj.bias.data[torch.where(attn_mask_kv)[0]]
+        if layer.self_attn.k_proj.bias.data is not None:
+            layer.self_attn.k_proj.bias.data = layer.self_attn.k_proj.bias.data[torch.where(attn_mask_kv)[0]]
+        if layer.self_attn.q_proj.bias.data is not None:
+            layer.self_attn.q_proj.bias.data = layer.self_attn.q_proj.bias.data[torch.where(attn_mask_qo)[0]]
+
         if bias:
             # Add the additional bias to compensate for the loss
             output_bias = ((attn_mean_inp.to(device) * ~attn_mask_qo.to(device)) @ output_weight.T)
@@ -134,8 +145,8 @@ def compress(layer, attn_mask, mlp_mask, attn_mean_inp, mlp_mean_inp, device, bi
         # Prune the output projection weight
         output_weight = layer.self_attn.o_proj.weight.data[:, torch.where(attn_mask_qo)[0]]
         # Update layer configurations for the new output shape after pruning
-        layer.self_attn.num_heads = retain_heads_qo
-        layer.self_attn.hidden_size = retain_heads_qo * args.head_dim
+        layer.self_attn.num_heads = int(torch.sum(retain_heads_qo))
+        layer.self_attn.hidden_size = int(torch.sum(retain_heads_qo * args.head_dim))
         if args.gqa_groups>1:
             layer.self_attn.num_key_value_heads = retain_heads_kv
         
@@ -167,12 +178,13 @@ def compress(layer, attn_mask, mlp_mask, attn_mean_inp, mlp_mean_inp, device, bi
         # Prune the down projection weight
         output_weight = layer.mlp.down_proj.weight.data[:, torch.where(mlp_mask)[0]]  
         
+        
         if bias:
             # Re-initialize the Linear layer with new shape and bias
             layer.mlp.down_proj.in_features = mlp_mask.sum().item()
             # layer.mlp.down_proj = torch.nn.Linear(in_features=output_weight.shape[1], out_features=output_weight.shape[0], bias=True).to(device)
             layer.mlp.down_proj.bias.data = output_bias
-            
+        
         # Assign the pruned weights
         layer.mlp.down_proj.weight.data = output_weight
         
@@ -199,7 +211,7 @@ def prune_flap(args, model, tokenizer, device=torch.device("cuda:0")):
     with torch.no_grad():
         inps, outs, position_ids = prepare_calibration_input(model, dataloader, device)
     layers = model.model.layers
-
+    print(layers)
     attn_metric_list, mlp_metric_list = [], []
     attn_baseline_inp_list, mlp_baseline_inp_list = [], []
     attn_mask, mlp_mask = [], []
@@ -246,7 +258,7 @@ def prune_flap(args, model, tokenizer, device=torch.device("cuda:0")):
 
         inps, outs = outs, inps # Use the original output as input to the next layer
         torch.cuda.empty_cache()
-
+    
     standarlization = lambda x: (x - torch.mean(x, axis=1, keepdim=True)) / torch.std(x, axis=1, keepdim=True)
 
     if args.structure in ["AL-AM"]:
@@ -278,3 +290,89 @@ def prune_flap(args, model, tokenizer, device=torch.device("cuda:0")):
                 
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
+
+def calculate_bi(model, dataloader, tokenizer, pruning_method="angular_distance", pruning_token='last'):
+        """
+        Calculate Block Influence (BI) scores for each layer.
+
+        Parameters:
+        - dataloader (DataLoader): DataLoader for the dataset.
+        - tokenizer (Tokenizer): Tokenizer for the model inputs.
+        - pruning_method (str, optional): Pruning method to use. One of "angular_distance", "cosine_similarity.
+        - pruning_token (str, optional): Pruning token to use. One of "all", "last".
+
+        Returns:
+        - list: List of BI scores for each block.
+        """
+        scores = []
+        num_batches = 0
+        model = model.eval()
+        with torch.no_grad():
+            for batch in tqdm(dataloader):
+                inputs = tokenizer(batch['text'], return_tensors="pt", padding=True, truncation=True, max_length=2048).to(model.device)
+                outputs = model(**inputs, output_hidden_states=True)
+                hidden_states = outputs.hidden_states
+
+                if not scores:
+                    scores = [0] * (len(hidden_states) - 1)
+
+                for i in range(1, len(hidden_states)):
+                    input_hidden_state = hidden_states[i-1]
+                    output_hidden_state = hidden_states[i]
+                    if pruning_token == 'last':
+                        input_hidden_state = input_hidden_state[:,-1,:]
+                        output_hidden_state = output_hidden_state[:,-1,:]
+                    sim = F.cosine_similarity(input_hidden_state, output_hidden_state)
+                    if pruning_method == 'angular_distance':
+                        sim = torch.clamp(sim, -1.0, 1.0)
+                        sim = (1 / math.pi) * torch.acos(sim)
+                    elif pruning_method == 'cosine_similarity':
+                        sim = 1 - sim
+                    scores[i-1] += sim.mean().item()
+
+                num_batches += 1
+
+        scores = [score / num_batches for score in scores]  # Average scores over all batches
+        return scores
+
+def prune_model_blocks(model, importance_scores: list, num_blocks_to_prune: int, skip_blocks: list = None):
+        """
+        Prunes blocks from the transformer model based on the importance scores.
+
+        Parameters:
+        - importance_scores (list): List of importance scores for each block.
+        - num_blocks_to_prune (int): Number of blocks to prune from the model.
+        - skip_blocks (list, optional): List of block indices to skip. Defaults to None.
+
+        Returns:
+        - PreTrainedModel: The pruned transformer model.
+        """
+
+        # Assign max score to skip blocks
+        if skip_blocks:
+            for block in skip_blocks:
+                importance_scores[block] = max(importance_scores)
+
+        # Sort blocks by importance score
+        sorted_blocks = sorted(range(len(importance_scores)), key=lambda i: importance_scores[i])
+
+        # Identify blocks to prune
+        blocks_to_prune = sorted_blocks[:num_blocks_to_prune]
+     
+        # Create a new model without the pruned blocks
+        pruned_model = copy.deepcopy(model)
+        # pruned_model.load_state_dict(self.model.state_dict())
+
+        # Prune the blocks
+        layers = []
+        for i, layer in enumerate(model.model.layers):
+            if i in blocks_to_prune:
+                continue
+            layer = model.model.layers[i]
+            layer.self_attn.layer_idx = len(layers)
+            layers.append(layer)
+        
+        pruned_model.model.layers = torch.nn.ModuleList(layers)
+        pruned_model.config.num_hidden_layers = len(model.model.layers) - len(blocks_to_prune)
+
+        return pruned_model
