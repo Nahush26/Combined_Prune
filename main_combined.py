@@ -10,19 +10,10 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from lm_eval.models.huggingface import HFLM
-# from lm_eval.tasks import TaskManager
+from lm_eval.tasks import TaskManager
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaForCausalLM
-from lib.orune_old import calculate_bi, prune_flap, prune_model_blocks
-# from lib.orune_old import prune_flap
+from lib.prune_old import calculate_bi, prune_flap, prune_model_blocks
 
-
-# from transformers import AutoProcessor, AutoModelForImageTextToText
-
-
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
-class Modal:
-    model = None
 
 
 def get_llm(model, device):
@@ -33,10 +24,6 @@ def get_llm(model, device):
             device_map=device,
             trust_remote_code=True
         )
-    
-
-
-        
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model, 
@@ -214,10 +201,8 @@ def main():
         gc.collect()
         # block_pruned_model.to(device)
         model = block_pruned_model
-        model_name = args.model.split("/")[-1]
-        # torch.save(model, f"{model_name}_{args.overall_budget}_{args.strategy}.pt")
         print(model)
-        torch.save(model, f"qwen_depth_10.pt")
+
     
     elif args.strategy == "width":
         prune_flap(args, model, tokenizer, device)
@@ -227,75 +212,8 @@ def main():
         )
         compression = {"compression_ratio" : 1 - width_pruned_params/orig_params}
         print(compression)
-        torch.save(model, "qwen_width_20.pt")
-        # model_name = args.model.split("/")[-1]
-        # torch.save(model, f"{model_name}_{args.overall_budget}_{args.strategy}.pt")
-    
-    elif args.strategy == 'baseline':
-        model.config.kv_heads = None
-        pass
-        # print(model.config.to_json())
-        # model.save_pretrained('./compressed')
-    # elif args.strategy == "depth_width":
-    #     bi_scores = calculate_bi(
-    #         model,
-    #         dataloader,
-    #         tokenizer,
-    #         args.pruning_method,
-    #         args.pruning_token,
-    #     )
-    #     block_pruned_model = prune_model_blocks(
-    #         model, bi_scores, args.num_blocks_to_prune, args.skip_blocks
-    #     )
-    #     block_pruned_params = (
-    #         sum(p.numel() for p in block_pruned_model.parameters()) / 1000**2
-    #     )
-    #     logger.info(
-    #         f"Compression After Block Pruning {1 - block_pruned_params/orig_params}"
-    #     )
-    #     del model
-    #     torch.cuda.empty_cache()
-    #     gc.collect()
-    #     block_pruned_model.to(device)
-    #     prune_flap(args, block_pruned_model, tokenizer, device)
-    #     block_and_width_pruned_params = (
-    #         sum(p.numel() for p in block_pruned_model.parameters()) / 1000**2
-    #     )
-    #     logger.info(
-    #         f"Compression After Block Pruning Follwed by Width Pruning {1 - block_and_width_pruned_params/orig_params}"
-    #     )
-    #     model = block_pruned_model
 
-    # elif args.strategy == "width_depth":
-    #     prune_flap(args, model, tokenizer, device)
-    #     width_pruned_params = sum(p.numel() for p in model.parameters()) / 1000**2
-    #     logger.info(
-    #         f"Compression After Width Pruning {1 - width_pruned_params/orig_params}"
-    #     )
-    #     bi_scores = calculate_bi(
-    #         model,
-    #         dataloader,
-    #         tokenizer,
-    #         args.pruning_method,
-    #         args.pruning_token,
-    #     )
-    #     block_pruned_model = prune_model_blocks(
-    #         model, bi_scores, args.num_blocks_to_prune, args.skip_blocks
-    #     )
-    #     del model
-    #     width_and_block_pruned_params = (
-    #         sum(p.numel() for p in block_pruned_model.parameters()) / 1000**2
-    #     )
-    #     logger.info(
-    #         f"Compression After Width Pruning followed by block pruning {1 - width_and_block_pruned_params/orig_params}"
-    #     )
-    #     torch.cuda.empty_cache()
-    #     gc.collect()
-    #     block_pruned_model.to(device)
-    #     model = block_pruned_model
-    # print(model) 
-    # torch.save(model, f"llama_instruct_{args.overall_budget}_{args.strategy}.pt")
-    # exit()
+    
 
     model = model.half()
     # Evaluate the model
@@ -303,137 +221,11 @@ def main():
         lm_obj = HFLM(pretrained=model, batch_size="auto")
         task_manager = lm_eval.tasks.TaskManager()
         results = []
-        # results.append(compression)
-        # print(compression)
         result = lm_eval.simple_evaluate(
             model=lm_obj,
-
-            tasks=["boolq","winogrande","arc_easy","arc_challenge","wikitext"],
-            # tasks = ['gsm8k'],
-            # tasks = ['wikitext','winogrande','arc_easy','arc_challenge'],
-            # tasks = ['gsm8k'],
-           
-            # num_fewshot = 5,
-            # tasks=["piqa"],
-            
+            tasks=["boolq","wikitext"],      
             task_manager=task_manager,
         )
-
-        results.append(result['results'])
-        model_name = args.model.split("/")[-1]
-        # torch.save(model, f"{model_name}_{args.overall_budget}_{args.strategy}.pt")
-        # results.append({"main_table": result["results"]})
-        model_name = args.model.split("/")[-1]
-        with open(f'results_depth_gsm8k/{model_name}_{args.strategy}_{args.pruning_ratio}_{args.overall_budget}_gsm8k.json', 'w') as json_file:
-            json.dump(results, json_file, indent=4)
-        exit()
-        print(result['results'])
-        model_name = args.model.split("/")[-1]
-        with open(f'results_depth_gsm8k/{model_name}_{args.strategy}_{args.pruning_ratio}_{args.overall_budget}_ifeval.json', 'w') as json_file:
-            json.dump(results, json_file, indent=4)
-        exit()
-        result = lm_eval.simple_evaluate(
-            model=lm_obj,
-            batch_size="auto",
-            # tasks=["boolq","winogrande","arc_easy","arc_challenge","gsm8k","mmlu", "wikitext"],
-            # tasks = ['wikitext','winogrande','arc_easy','arc_challenge'],
-            tasks = ['mmlu'],
-            # limit = 0.2,
-            # num_fewshot = 5,
-            # tasks=["piqa"],
-            
-            task_manager=task_manager,
-        )
-        print(result['results']['mmlu'])
-        
-        # result = lm_eval.simple_evaluate(
-        #     model=lm_obj,
-        #     tasks=["mmlu"],
-        #     limit = 0.5,
-        #     tasks=["boolq","winogrande","mm"],
-        #     batch_size = "auto:32",
-        #     num_fewshot=5,
-        #     task_manager=task_manager,
-        # )
-        # print(result['results']['mmlu'])
-        # print(compression)
-     
-        # results.append({"20_mmlu": result["results"]['mmlu']})
-        model_name = args.model.split("/")[-1]
-        with open(f'results_width/{mmlu}_{model_name}_{args.strategy}_{args.pruning_ratio}_{args.start_pruning_layer_idx}_{args.overall_budget}.json', 'w') as json_file:
-            json.dump(results, json_file, indent=4)
-        exit()
-     
-        # result = lm_eval.simple_evaluate(
-        #     model=lm_obj,
-        #     tasks=["boolq","winogrande","gsm8k","mmlu"],
-        #     num_fewshot=2,
-        #     task_manager=task_manager,
-        #     batch_size="auto",
-        # )
-        # results.append({"fewshot_2": result["results"]})
-        # result = lm_eval.simple_evaluate(
-        #     model=lm_obj,
-        #     tasks=["mmlu","boolq","winogrande"],
-        #     num_fewshot=5,
-        #     task_manager=task_manager,
-        #     batch_size="auto",
-        # )
-
-        # results.append({"others": result["results"]})
-
-        print(results)
-        prompts = [
-            "Once upon a time",
-            "In a distant future",
-            "The purpose of life is",
-            "Artificial intelligence will",
-            "The most important discovery in history"
-        ]
-
-        def calculate_tokens_per_second(prompt):
-            # Tokenize the prompt
-            input_ids = tokenizer(prompt, return_tensors="pt").input_ids
-
-            # Measure the time taken for token generation
-            start_time = time.time()
-
-            # Generate tokens
-            output = model.generate(input_ids.to(device), max_length=100, do_sample=False)
-
-            end_time = time.time()
-
-            # Calculate the number of tokens generated
-            num_tokens_generated = output.shape[1] - input_ids.shape[1]  # Exclude input tokens
-
-            # Calculate time taken and tokens per second
-            time_taken = end_time - start_time
-            tokens_per_second = num_tokens_generated / time_taken if time_taken > 0 else float('inf')
-
-            print(f"Prompt: {prompt}")
-            print(f"Time taken: {time_taken:.4f} seconds")
-            print(f"Tokens generated: {num_tokens_generated}")
-            print(f"Tokens per second: {tokens_per_second:.2f}\n")
-            
-            return tokens_per_second
-
-        # Iterate over the prompts and calculate tokens per second
-        tokens_per_second_list = []
-
-        for prompt in prompts:
-            tokens_per_second = calculate_tokens_per_second(prompt)
-            tokens_per_second_list.append(tokens_per_second)
-
-        # Calculate the average tokens per second
-        average_tokens_per_second = sum(tokens_per_second_list) / len(tokens_per_second_list)
-        results.append({"tokens_per_second": average_tokens_per_second})
-        for i, result in enumerate(results):
-            logger.info(f"{i} :\n{json.dumps(result, indent=4)}")
-        model_name = args.model.split("/")[-1]
-        with open(f'results/{model_name}_{args.strategy}_{args.pruning_ratio}.json', 'w') as json_file:
-            json.dump(results, json_file, indent=4)
-
-        logger.info("")
 
 if __name__ == "__main__":
     main()
